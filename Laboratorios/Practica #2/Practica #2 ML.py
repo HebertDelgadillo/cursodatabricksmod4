@@ -1,4 +1,5 @@
 # Databricks notebook source
+# DBTITLE 1,Preprocesamiento de Datos
 # MAGIC %sql
 # MAGIC DROP TABLE IF EXISTS account;
 # MAGIC CREATE TABLE account
@@ -70,7 +71,8 @@
 # MAGIC     WHEN a.frequency  = "POPLATEK MESICNE" THEN "Uso mensual"
 # MAGIC     WHEN a.frequency  = "POPLATEK TYDNE" THEN "Uso semanal"
 # MAGIC     when a.frequency  = "POPLATEK PO OBRATU" THEN "Frecuente"
-# MAGIC end Frecuencia, d.a3 as Region,d.A11 as Salario_Promedio,d.a14 as Empresarios_en_miles
+# MAGIC end Frecuencia, d.a3 as Region,d.A11 as Salario_Promedio,d.a14 as Empresarios_en_miles,d.a4 as Habitantes,
+# MAGIC d.a10 as Urbanizacion,d.a13 as Desempleo,d.a16 as Crimenes
 # MAGIC from trans t 
 # MAGIC inner join account a 
 # MAGIC on t.account_id =a.account_id
@@ -78,9 +80,11 @@
 # MAGIC on l.account_id = a.account_id
 # MAGIC left join district d 
 # MAGIC on d.a1 = a.district_id 
-# MAGIC group by t.account_id, Confiabilidad, Frecuencia, d.A3,d.a11,d.a14; 
+# MAGIC group by t.account_id, Confiabilidad, Frecuencia, d.A3,d.a11,d.a14,
+# MAGIC d.a4,d.a10,d.a13,d.a16;
 # MAGIC
-# MAGIC select * from transcompleta
+# MAGIC SELECT * FROM transcompleta WHERE Confiabilidad = 'No se presto';
+# MAGIC SELECT * FROM transcompleta WHERE Confiabilidad != 'No se presto';
 
 # COMMAND ----------
 
@@ -95,7 +99,7 @@ spark = SparkSession.builder \
       .master("local[1]") \
             .appName("SparkByExamples.com") \
                   .getOrCreate()
-df=spark.sql("select * from transcompleta")
+df=spark.sql("SELECT * FROM transcompleta WHERE Confiabilidad != 'No se presto';")
 
 # COMMAND ----------
 
@@ -107,7 +111,7 @@ df.printSchema()
 
 # COMMAND ----------
 
-df2= spark.sql("select STRING(Cuenta),Double(Nro_Movimientos),Double(Total_Dinero_movido), String(Confiabilidad),String(Frecuencia), String(Region), Double(Salario_Promedio),Double(Empresarios_en_miles) from transcompleta")
+df2= spark.sql("select Double(Cuenta),Double(Nro_Movimientos),Double(Total_Dinero_movido), String(Confiabilidad),String(Frecuencia), String(Region), Double(Salario_Promedio),Double(Empresarios_en_miles),Double(Habitantes),Double(Urbanizacion),Double(Desempleo),Double(Crimenes) from transcompleta")
 
 # COMMAND ----------
 
@@ -148,15 +152,11 @@ df3.groupBy(F.col('Region')).count().show(5)
 # COMMAND ----------
 
 # DBTITLE 1,Agrupamiento de Variables Cuantitativas
-df3.select(['Nro_Movimientos','Total_Dinero_movido','Salario_Promedio','Empresarios_en_miles']).describe().show(10)
+df3.select(['Nro_Movimientos','Total_Dinero_movido','Salario_Promedio','Empresarios_en_miles','Habitantes','Urbanizacion','Desempleo','Crimenes']).describe().show(10)
 
 # COMMAND ----------
 
-df4 = df3.select(['Nro_Movimientos','Total_Dinero_movido','Confiabilidad','Frecuencia','Region','Salario_Promedio','Empresarios_en_miles'])
-df4.show(5)
-
-# COMMAND ----------
-
+# DBTITLE 1,Modelado del Aprendizaje Supervisado (Logistic Regression)
 from pyspark.ml.feature import VectorAssembler, OneHotEncoder, StringIndexer
 
 # COMMAND ----------
@@ -171,7 +171,7 @@ Confiabilidad_indexer = StringIndexer(inputCol= 'Confiabilidad', outputCol= 'Con
 
 # COMMAND ----------
 
-assembler = VectorAssembler(inputCols = ['FrecuenciaVec','RegionVec','Nro_Movimientos','Total_Dinero_movido','Salario_Promedio','Empresarios_en_miles'], outputCol= 'features')
+assembler = VectorAssembler(inputCols = ['FrecuenciaVec','RegionVec','Cuenta','Nro_Movimientos','Total_Dinero_movido','Salario_Promedio','Empresarios_en_miles','Habitantes','Urbanizacion','Desempleo','Crimenes'], outputCol= 'features')
 
 # COMMAND ----------
 
@@ -195,7 +195,7 @@ pipeline = Pipeline(stages= [
 
 # COMMAND ----------
 
-train_data, test_data = df4.randomSplit([0.7,0.3])
+train_data, test_data = df3.randomSplit([0.7,0.3])
 
 # COMMAND ----------
 
@@ -209,6 +209,7 @@ results.show(5)
 # COMMAND ----------
 
 from pyspark.ml.evaluation import BinaryClassificationEvaluator
+from pyspark.mllib.evaluation import BinaryClassificationMetrics
 
 # COMMAND ----------
 
@@ -223,3 +224,79 @@ results.select('ConfiabilidadIndex', 'prediction').show(10)
 # DBTITLE 1,Evaluacion del Modelo
 auc = me_eval.evaluate(results)
 print("AUC:",auc)
+
+# COMMAND ----------
+
+# DBTITLE 1,Modelado del Aprendizaje Supervisado (Random Forest)
+from pyspark.ml.classification import RandomForestClassifier
+rf = RandomForestClassifier(numTrees=10, maxDepth=6, labelCol="ConfiabilidadIndex", seed=42, leafCol="leafId")
+pipelinerf = Pipeline(stages= [
+    Region_indexer,
+    Region_encoder,
+    Frecuencia_indexer,
+    Frecuencia_encoder,
+    Confiabilidad_indexer,
+    assembler, 
+    rf])
+
+# COMMAND ----------
+
+fit_modelrf = pipelinerf.fit(train_data)
+
+# COMMAND ----------
+
+resultsrf = fit_modelrf.transform(test_data)
+resultsrf.show(5)
+
+# COMMAND ----------
+
+# DBTITLE 1,Evaluacion del Modelo (Random Forest)
+auc = me_eval.evaluate(resultsrf)
+print("AUC:",auc)
+
+# COMMAND ----------
+
+# DBTITLE 1,Segmentacion
+from pyspark.ml.clustering import KMeans
+from pyspark.ml.evaluation import ClusteringEvaluator
+
+# COMMAND ----------
+
+dfclus= spark.sql("select Double(Cuenta),Double(Nro_Movimientos),Double(Total_Dinero_movido), String(Confiabilidad),String(Frecuencia), String(Region), Double(Salario_Promedio),Double(Empresarios_en_miles),Double(Habitantes),Double(Urbanizacion),Double(Desempleo),Double(Crimenes) from transcompleta WHERE Confiabilidad = 'No se presto';")
+kmeans = KMeans().setK(5).setSeed(1)
+
+# COMMAND ----------
+
+train_data, test_data = dfclus.randomSplit([0.7,0.3])
+
+# COMMAND ----------
+
+pipeline2 = Pipeline(stages= [
+    Region_indexer,
+    Region_encoder,
+    Frecuencia_indexer,
+    Frecuencia_encoder,
+    assembler, 
+    kmeans])
+
+# COMMAND ----------
+
+fit_model2 = pipeline2.fit(train_data)
+
+# COMMAND ----------
+
+predictions2 = fit_model2.transform(test_data)
+
+# COMMAND ----------
+
+predictions2.show(10)
+
+# COMMAND ----------
+
+# DBTITLE 1,Evaluacion del Modelo (KMeans)
+evaluador = ClusteringEvaluator()
+
+# COMMAND ----------
+
+silhouette = evaluador.evaluate(predictions2)
+print("El coeficiente Silhouette usando distancias euclidianas al cuadrado es = " + str(silhouette))
