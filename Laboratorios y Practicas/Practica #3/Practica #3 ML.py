@@ -1,11 +1,4 @@
 # Databricks notebook source
-# DBTITLE 1,Preprocesamiento de Datos
-import pandas as pd
-import numpy as np
-pd.options.display.float_format = '{:,.2F}'.format
-
-# COMMAND ----------
-
 # MAGIC %sql
 # MAGIC DROP TABLE IF EXISTS Nova;
 # MAGIC CREATE TABLE Nova
@@ -49,7 +42,6 @@ df2.printSchema()
 
 df3=df2.drop('FECHA DE INGRESO')
 df3=df3.drop('Factura')
-df3=df3.drop('Almacen')
 df3=df3.drop('Fecha')
 df3=df3.drop('Hora')
 df3=df3.drop('Total')
@@ -87,16 +79,27 @@ df3.groupBy(F.col('Almacen')).count().show(5)
 df3.groupBy(F.col('Boleta')).count().show(5)
 df3.groupBy(F.col('Marca')).count().show(5)
 df3.groupBy(F.col('Cliente')).count().show(5)
-df3.groupBy(F.col('Vendedor')).count().show(5)
 
 # COMMAND ----------
 
 # DBTITLE 1,Agrupamiento de Variables Cuantitativas
-df3.select(['Total_cajas','Pares','Total','Pago']).describe().show(10)
+df3.select(['Total_cajas','Pares','Pago']).describe().show(10)
 
 # COMMAND ----------
 
-# DBTITLE 1,Modelado del Aprendizaje Supervisado (Logistic Regression)
+df3.show()
+df3.printSchema()
+
+# COMMAND ----------
+
+# DBTITLE 1,Segmentacion
+from pyspark.ml.clustering import KMeans
+from pyspark.ml.evaluation import ClusteringEvaluator
+kmeans = KMeans().setK(5).setSeed(1)
+
+# COMMAND ----------
+
+# DBTITLE 0,Modelado del Aprendizaje Supervisado
 from pyspark.ml.feature import VectorAssembler, OneHotEncoder, StringIndexer
 
 # COMMAND ----------
@@ -107,120 +110,33 @@ Codigo_encoder = OneHotEncoder(inputCol = 'CodigoIndex', outputCol= 'CodigoVec')
 Material_indexer = StringIndexer(inputCol= 'Material', outputCol= 'MaterialIndex')
 Material_encoder = OneHotEncoder(inputCol = 'MaterialIndex', outputCol= 'MaterialVec')
 
+Color_indexer = StringIndexer(inputCol= 'Color', outputCol= 'ColorIndex')
+Color_encoder = OneHotEncoder(inputCol = 'ColorIndex', outputCol= 'ColorVec')
+
+Item_indexer = StringIndexer(inputCol= 'Item', outputCol= 'ItemIndex')
+Item_encoder = OneHotEncoder(inputCol = 'ItemIndex', outputCol= 'ItemVec')
+
 Boleta_indexer = StringIndexer(inputCol= 'Boleta', outputCol= 'BoletaIndex')
 Boleta_encoder = OneHotEncoder(inputCol = 'BoletaIndex', outputCol= 'BoletaVec')
 
 Marca_indexer = StringIndexer(inputCol= 'Marca', outputCol= 'MarcaIndex')
 Marca_encoder = OneHotEncoder(inputCol = 'MarcaIndex', outputCol= 'MarcaVec')
 
-# COMMAND ----------
-
-assembler = VectorAssembler(inputCols = ['CodigoVec','MaterialVec','BoletaVec','MarcaVec','Pares','Total_cajas'], outputCol= 'features')
-
-# COMMAND ----------
-
-from pyspark.ml.regression import RandomForestRegressor
+Cliente_indexer = StringIndexer(inputCol= 'Cliente', outputCol= 'ClienteIndex')
+Cliente_encoder = StringIndexer(inputCol= 'ClienteIndex', outputCol= 'ClienteVec')
 
 # COMMAND ----------
 
-rf = RandomForestRegressor(labelCol="Pago", featuresCol="features")
+from pyspark.ml import Pipeline
 
 # COMMAND ----------
 
-pipeline = Pipeline(stages= [Codigo_indexer, Codigo_encoder,    Material_indexer,    Material_encoder,  Boleta_indexer,    Boleta_encoder,    Marca_indexer,    Marca_encoder,    assembler,    rf])
+train_data, test_data = df3.randomSplit([0.7,0.3])
 
 # COMMAND ----------
 
-(trainingData, testData) = df3.randomSplit([0.8, 0.2])
-
-# COMMAND ----------
-
-from pyspark.ml.tuning import CrossValidator
-from pyspark.ml.evaluation import RegressionEvaluator
-from pyspark.ml.tuning import ParamGridBuilder
-from pyspark.ml.evaluation import MulticlassClassificationEvaluator
-import numpy as np
-paramGrid = ParamGridBuilder() \
-    .addGrid(rf.numTrees, [int(x) for x in np.linspace(start = 10, stop = 50, num = 3)]) \
-    .addGrid(rf.maxDepth, [int(x) for x in np.linspace(start = 5, stop = 25, num = 3)]) \
-    .build()
-crossval = CrossValidator(estimator=pipeline,
-                          estimatorParamMaps=paramGrid,
-                          evaluator=RegressionEvaluator(labelCol="Pago", predictionCol="prediction", metricName="rmse"),
-                          numFolds=3)
-
-# COMMAND ----------
-
-model = pipeline.fit(trainingData)
-
-# COMMAND ----------
-
-predictions = model.transform(testData)
-rmse = evaluator.evaluate(predictions)
-
-# COMMAND ----------
-
-predictions.select('Pago', 'prediction').show(10)
-
-# COMMAND ----------
-
-# DBTITLE 1,Evaluacion del Modelo
-auc = me_eval.evaluate(results)
-print("AUC:",auc)
-
-# COMMAND ----------
-
-# DBTITLE 1,Modelado del Aprendizaje Supervisado (Random Forest)
-from pyspark.ml.classification import RandomForestClassifier
-rf = RandomForestClassifier(numTrees=10, maxDepth=6, labelCol="ConfiabilidadIndex", seed=42, leafCol="leafId")
-pipelinerf = Pipeline(stages= [
-    Region_indexer,
-    Region_encoder,
-    Frecuencia_indexer,
-    Frecuencia_encoder,
-    Confiabilidad_indexer,
-    assembler, 
-    rf])
-
-# COMMAND ----------
-
-fit_modelrf = pipelinerf.fit(train_data)
-
-# COMMAND ----------
-
-resultsrf = fit_modelrf.transform(test_data)
-resultsrf.show(5)
-
-# COMMAND ----------
-
-# DBTITLE 1,Evaluacion del Modelo (Random Forest)
-auc = me_eval.evaluate(resultsrf)
-print("AUC:",auc)
-
-# COMMAND ----------
-
-# DBTITLE 1,Segmentacion
-from pyspark.ml.clustering import KMeans
-from pyspark.ml.evaluation import ClusteringEvaluator
-
-# COMMAND ----------
-
-dfclus= spark.sql("select Double(Cuenta),Double(Nro_Movimientos),Double(Total_Dinero_movido), String(Confiabilidad),String(Frecuencia), String(Region), Double(Salario_Promedio),Double(Empresarios_en_miles),Double(Habitantes),Double(Urbanizacion),Double(Desempleo),Double(Crimenes) from transcompleta WHERE Confiabilidad = 'No se presto';")
-kmeans = KMeans().setK(5).setSeed(1)
-
-# COMMAND ----------
-
-train_data, test_data = dfclus.randomSplit([0.7,0.3])
-
-# COMMAND ----------
-
-pipeline2 = Pipeline(stages= [
-    Region_indexer,
-    Region_encoder,
-    Frecuencia_indexer,
-    Frecuencia_encoder,
-    assembler, 
-    kmeans])
+assembler = VectorAssembler(inputCols = ['CodigoVec','MaterialVec','ColorVec','ItemVec', 'BoletaVec','MarcaVec','ClienteVec','Pares','Total_cajas','Pago'], outputCol= 'features')
+pipeline2 = Pipeline(stages= [Codigo_indexer ,Codigo_encoder ,Material_indexer ,Material_encoder ,Color_indexer ,Color_encoder ,Item_indexer, Item_encoder  Marca_indexer,Boleta_indexer ,Boleta_encoder     Marca_encoder,Cliente_indexer , Cliente_encoder  assembler,  kmeans])
 
 # COMMAND ----------
 
